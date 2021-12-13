@@ -166,9 +166,3 @@ with model:
     trace = pm.sample(5000, tune=2000, chains=2, target_accept=0.9, cores=1)
     pp = pm.sample_posterior_predictive(trace)
     idata = az.from_pymc3(trace=trace, posterior_predictive=pp)
-
-
-# %%
-# save
-file_name = 'data/trace95/' + var_name + '.nc'
-idata.to_netcdf(file_name)
