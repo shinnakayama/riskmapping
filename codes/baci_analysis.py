@@ -1,3 +1,4 @@
+# %%
 import os
 import sys
 import numpy as np
@@ -9,9 +10,12 @@ import patsy
 import theano.tensor as tt
 
 
+var_name = sys.argv[1]
+
+# %%
 #----------------------------
 # load PSMA country data
-country = pd.read_csv('Updated_PSMA_dates_27 JAN 2021.csv')
+country = pd.read_csv('data/Updated_PSMA_dates_27 JAN 2021.csv')
 country.dropna(axis=0, how='all', inplace=True)
 country = country[country.Country != 'European Union'].copy()
 country = country[country.Entry_into_force_date.notnull()].copy()
@@ -23,14 +27,20 @@ in2017 = [(x >= pd.Timestamp(2017, 1, 1)) * (x < pd.Timestamp(2018, 1, 1)) for x
 
 
 # list of countries with PSMA in 2016
-psma_party2016 = country.loc[np.array(in2016)==1, 'iso3']
-# list of countries with PSMA in 2017
-psma_party2017 = country.loc[np.array(in2017)==1, 'iso3']
+psma_party2016 = list(country.loc[np.array(in2016)==1, 'iso3'])
+## add denmark
+psma_party2016.append('DNK')
 
+# list of countries with PSMA in 2017
+psma_party2017 = list(country.loc[np.array(in2017)==1, 'iso3'])
+# add Greenland and Faroe Island, remove Denmark
+psma_party2017.remove('DNK')
+psma_party2017.append('GRL')
+psma_party2017.append('FRO')
 
 #-----------------------------
-# output of `port_visit.sql`
-data = pd.read_csv('port_visit.csv')
+# load port visit data
+data = pd.read_csv('data/port_visit.csv')
 
 
 # remove countries that ratified PSMA in 2017
@@ -44,14 +54,16 @@ foo = foo[foo.vessel_class.notnull()]
 
 # territories and their sovereign nations
 # queried from GFW on March 29, 2021
-# `world-fishing-827.gfw_research.eez_info
-eez = pd.read_csv('eez_info.csv')
+eez = pd.read_csv('data/eez_info.csv')
 eez = eez[eez.eez_type=='200NM']
 eez = eez[eez.territory1_iso3 != eez.sovereign1_iso3]
 pair = eez[['territory1_iso3', 'sovereign1_iso3']].drop_duplicates()
-# add Hong Kong and Macau
+
+# add Mayotte, Hong Kong, Macau, Aland Islands
 pair = pair.append({'territory1_iso3':'MAC', 'sovereign1_iso3':'CHN'}, ignore_index=True)
 pair = pair.append({'territory1_iso3':'HKG', 'sovereign1_iso3':'CHN'}, ignore_index=True)
+pair = pair.append({'territory1_iso3':'MYT', 'sovereign1_iso3':'FRA'}, ignore_index=True)
+pair = pair.append({'territory1_iso3':'ALA', 'sovereign1_iso3':'FIN'}, ignore_index=True)
 
 
 # add sovereign nations to their territories for port_iso3 and flag
@@ -73,9 +85,6 @@ fishing_gear = ['trollers', 'trawlers', 'squid_jigger', 'set_longlines', 'set_gi
 all_class = fishing_gear + ['bunker', 'cargo', 'specialized_reefer', 'tanker']
 
 
-var_name = 'fishing_gear'
-
-
 # each vessel class
 if var_name in all_class:
     bar = bar[bar.vessel_class==var_name]
@@ -88,16 +97,6 @@ else:
     # flag group
     elif var_name in ['group1', 'group2', 'group3', 'china', 'other']:
         bar = bar[bar.flag_group==var_name]
-    # domestic/foreign
-    elif var_name == 'domestic':
-        bar = bar[bar.flag == bar.port_iso3]
-    elif var_name == 'foreign':
-        bar = bar[bar.flag != bar.port_iso3]
-    # encountered / not enountered
-    elif var_name == 'encountered':
-        bar = bar[bar.is_encountered]
-    elif var_name == 'not_encountered':
-        bar = bar[~bar.is_encountered]
     else:
         sys.exit()
 
@@ -106,22 +105,22 @@ else:
 baz = pd.DataFrame(bar.groupby(['year', 'port_iso3']).count().start_timestamp)
 baz.rename(columns={'start_timestamp': 'n_visits'}, inplace=True)
 baz.reset_index(inplace=True)
-baz = baz[baz.year.isin([2015, 2017])]
+baz = baz[baz.year.isin([2015, 2017])].copy()
 
 # add PSMA & before/after
-baz['psma'] = [1 if any(x == psma_party2016) else 0 for x in baz.port_iso3]
+baz['psma'] = [1 if x in psma_party2016 else 0 for x in baz.port_iso3]
 baz['after'] = [0 if x==2015 else 1 for x in baz.year]
 keep = np.intersect1d(baz.loc[baz.after==0, 'port_iso3'], baz.loc[baz.after==1, 'port_iso3'])
-baz = baz[baz.port_iso3.isin(keep)]
+baz = baz[baz.port_iso3.isin(keep)].copy()
 
 
 # remove countries/territories with few visits
 summary = baz.sort_values('n_visits', ascending=False).copy()
 summary['proportion'] = np.cumsum(summary.n_visits)/np.sum(summary.n_visits)
-cutoff = summary.loc[summary.proportion > 0.99, 'n_visits'].values[0]
+cutoff = summary.loc[summary.proportion > 0.95, 'n_visits'].values[0]
 remove_iso3 = summary.loc[summary.n_visits < cutoff, 'port_iso3'].unique()
 
-baz = baz[~baz.port_iso3.isin(remove_iso3)]
+baz = baz[~baz.port_iso3.isin(remove_iso3)].copy()
 
 #----------------------------
 # prepare model input
@@ -144,7 +143,7 @@ Y_scaled = Y/np.max(Y)
 with pm.Model() as model:
 
     # fixed effects
-    beta_X = pm.Normal('beta_X', mu=0, sigma=100, shape=4)
+    beta_X = pm.Normal('beta_X', mu=0, sigma=10, shape=4)
     mu_X = pm.math.dot(X, beta_X)
 
     # random intercept
@@ -164,35 +163,12 @@ with pm.Model() as model:
 #----------------------------
 # sample
 with model:
-    trace = pm.sample(5000, tune=2000, chains=2, target_accept=0.9, return_inferencedata=True)
+    trace = pm.sample(5000, tune=2000, chains=2, target_accept=0.9, cores=1)
+    pp = pm.sample_posterior_predictive(trace)
+    idata = az.from_pymc3(trace=trace, posterior_predictive=pp)
 
 
-
+# %%
 # save
-file_name = 'data/psma/trace/' + var_name + '.nc'
-trace.to_netcdf(file_name)
-
-
-#----------------------------
-# summary table
-before = baz[baz.year==2015].copy()
-after = baz[baz.year==2017].copy()
-
-before.set_index('port_iso3', inplace=True)
-after.set_index('port_iso3', inplace=True)
-
-
- # summary
-summary = pd.DataFrame(index=before.index)
-summary['port_state'] = [coco.convert(names=x, to='names') for x in summary.index]
-summary['psma_2016'] = before.psma
-summary['n_visits_2015'] = before.n_visits
-summary['n_visits_2017'] = after.n_visits
-obs = np.log(after.n_visits/np.max(Y))
-pred = np.log(before.n_visits/np.max(Y)) + np.median(trace.posterior.beta_X, axis=(0,1))[2]
-summary['relative_change'] = np.exp(obs - pred)
-summary.sort_values('relative_change', inplace=True)
-
-# save
-file_name = 'data/psma/rank/' + var_name + '.csv'
-summary.to_csv(file_name)
+file_name = 'data/trace95/' + var_name + '.nc'
+idata.to_netcdf(file_name)
